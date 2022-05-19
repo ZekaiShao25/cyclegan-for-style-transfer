@@ -1,7 +1,7 @@
 import os
 import PIL.Image as Image
 
-rootdir = '/home/newdisk/zekai.shao/pytorch-CycleGAN-and-pix2pix/results/basic_cyclegan_default_para/test_latest/'
+rootdir = '/home/newdisk/zekai.shao/pytorch-CycleGAN-and-pix2pix/results/basic_cyclegan_convnext_L/test_latest/'
 
 dir1 = os.path.join(rootdir, 'set1')
 dir2 = os.path.join(rootdir, 'set2')
