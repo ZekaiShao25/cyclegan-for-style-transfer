@@ -1,5 +1,11 @@
+说明：  
+基本模型：resnet6, resnet9, unet128, unet256  
+仿照CycleGAN风格的Generator：resnet18, convnext27  
+Autoencoder风格的Generator：convnext_B, convnext_L （不推荐）  
 
-<img src='imgs/horse2zebra.gif' align="right" width=384>
+新增：eval.py, 可以测试模型FID（虽然不知道对不对）
+运行：`python eval.py --dataroot ./val_dataset --name basic_cyclegan_unet --model test --model_suffix _A --netG unet_256 --gpu_ids 0`
+说明：resnet系列和unet系列需要加上`--no_dropout`选项，`val_dataset`需要自己提前划分，目前随机取100张
 
 <br><br><br>
 
