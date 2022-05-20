@@ -100,7 +100,7 @@ if __name__ == '__main__':
 
     for file in os.listdir(image_dir):
         img = Image.open(os.path.join(image_dir, file))
-        flag = file.split('_')[1].split('.')[0]
+        flag = file.split('_')[-1].split('.')[0]
         if flag == 'real':
             img.save(os.path.join(dir1, file))
         elif flag == 'fake':
@@ -108,7 +108,11 @@ if __name__ == '__main__':
         else:
             raise NotImplementedError
 
-    fid_value = fid_score.calculate_fid_given_paths(paths=[dir1, dir2],
+    dir_gt = opt.dataroot + '/valB/'
+    print("Path_gt: {}".format(dir_gt))
+    print("Path_pred: {}".format(dir2))
+
+    fid_value = fid_score.calculate_fid_given_paths(paths=[dir_gt, dir2],
                                                     batch_size=50,
                                                     cuda=opt.gpu_ids[0],
                                                     dims=2048)
