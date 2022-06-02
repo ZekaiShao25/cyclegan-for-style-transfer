@@ -44,78 +44,93 @@ except ImportError:
     print('Warning: wandb package cannot be found. The option "--use_wandb" will result in error.')
 
 if __name__ == '__main__':
-    opt = TestOptions().parse()  # get test options
-    # hard-code some parameters for test
-    opt.num_threads = 0  # test code only supports num_threads = 0
-    opt.batch_size = 1  # test code only supports batch_size = 1
-    opt.serial_batches = True  # disable data shuffling; comment this line if results on randomly chosen images are needed.
-    opt.no_flip = True  # no flip; comment this line if results on flipped images are needed.
-    opt.display_id = -1  # no visdom display; the test code saves the results to a HTML file.
-    dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
-    model = create_model(opt)  # create a model given opt.model and other options
-    model.setup(opt)  # regular setup: load and print networks; create schedulers
+    results = []
+    epochs = []
+    for epoch in range (195, 201, 5):
+        opt = TestOptions().parse()  # get test options
+        # hard-code some parameters for test
+        if opt.epoch != 'latest':
+            opt.epoch = epoch
+        opt.num_threads = 0  # test code only supports num_threads = 0
+        opt.batch_size = 1  # test code only supports batch_size = 1
+        opt.serial_batches = True  # disable data shuffling; comment this line if results on randomly chosen images are needed.
+        opt.no_flip = True  # no flip; comment this line if results on flipped images are needed.
+        opt.display_id = -1  # no visdom display; the test code saves the results to a HTML file.
+        dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
+        model = create_model(opt)  # create a model given opt.model and other options
+        model.setup(opt)  # regular setup: load and print networks; create schedulers
 
-    # initialize logger
-    if opt.use_wandb:
-        wandb_run = wandb.init(project='CycleGAN-and-pix2pix', name=opt.name,
-                               config=opt) if not wandb.run else wandb.run
-        wandb_run._label(repo='CycleGAN-and-pix2pix')
+        # initialize logger
+        if opt.use_wandb:
+            wandb_run = wandb.init(project='CycleGAN-and-pix2pix', name=opt.name,
+                                   config=opt) if not wandb.run else wandb.run
+            wandb_run._label(repo='CycleGAN-and-pix2pix')
 
-    # create a website
-    web_dir = os.path.join(opt.results_dir, opt.name,
-                           '{}_{}'.format(opt.phase, opt.epoch))  # define the website directory
-    if opt.load_iter > 0:  # load_iter is 0 by default
-        web_dir = '{:s}_iter{:d}'.format(web_dir, opt.load_iter)
-    print('creating web directory', web_dir)
-    webpage = html.HTML(web_dir, 'Experiment = %s, Phase = %s, Epoch = %s' % (opt.name, opt.phase, opt.epoch))
-    # test with eval mode. This only affects layers like batchnorm and dropout.
-    # For [pix2pix]: we use batchnorm and dropout in the original pix2pix. You can experiment it with and without eval() mode.
-    # For [CycleGAN]: It should not affect CycleGAN as CycleGAN uses instancenorm without dropout.
-    if opt.eval:
-        model.eval()
-    for i, data in enumerate(dataset):
-        if i >= opt.num_test:  # only apply our model to opt.num_test images.
+        # create a website
+        web_dir = os.path.join(opt.results_dir, opt.name,
+                               '{}_{}'.format(opt.phase, opt.epoch))  # define the website directory
+        if opt.load_iter > 0:  # load_iter is 0 by default
+            web_dir = '{:s}_iter{:d}'.format(web_dir, opt.load_iter)
+        print('creating web directory', web_dir)
+        webpage = html.HTML(web_dir, 'Experiment = %s, Phase = %s, Epoch = %s' % (opt.name, opt.phase, opt.epoch))
+        # test with eval mode. This only affects layers like batchnorm and dropout.
+        # For [pix2pix]: we use batchnorm and dropout in the original pix2pix. You can experiment it with and without eval() mode.
+        # For [CycleGAN]: It should not affect CycleGAN as CycleGAN uses instancenorm without dropout.
+        if opt.eval:
+            model.eval()
+        for i, data in enumerate(dataset):
+            if i >= opt.num_test:  # only apply our model to opt.num_test images.
+                break
+            model.set_input(data)  # unpack data from data loader
+            model.test()  # run inference
+            visuals = model.get_current_visuals()  # get image results
+            img_path = model.get_image_paths()  # get image paths
+            if i % 5 == 0:  # save images to an HTML file
+                print('processing (%04d)-th image... %s' % (i, img_path))
+            image_dir = webpage.get_image_dir()
+            short_path = ntpath.basename(img_path[0])
+            name = os.path.splitext(short_path)[0]
+            for label, im_data in visuals.items():
+                im = util.tensor2im(im_data)
+                image_name = '%s_%s.png' % (name, label)
+                save_path = os.path.join(image_dir, image_name)
+                util.save_image(im, save_path, aspect_ratio=1.0)
+
+        dir1 = os.path.join(web_dir, 'set1')
+        dir2 = os.path.join(web_dir, 'set2')
+
+        if not os.path.exists(dir1):
+            os.makedirs(dir1)
+        if not os.path.exists(dir2):
+            os.makedirs(dir2)
+
+        for file in os.listdir(image_dir):
+            img = Image.open(os.path.join(image_dir, file))
+            flag = file.split('_')[-1].split('.')[0]
+            if flag == 'real':
+                img.save(os.path.join(dir1, file))
+            elif flag == 'fake':
+                img.save(os.path.join(dir2, file))
+            else:
+                raise NotImplementedError
+
+        dir_gt = opt.dataroot + '/valB/'
+
+        if not os.path.exists(dir_gt):
+            dir_gt = opt.dataroot+'/trainB/'
+
+        print("Path_gt: {}".format(dir_gt))
+        print("Path_pred: {}".format(dir2))
+
+        fid_value = fid_score.calculate_fid_given_paths(paths=[dir_gt, dir2],
+                                                        batch_size=50,
+                                                        cuda=opt.gpu_ids[0],
+                                                        dims=2048)
+        print(fid_value)
+        if opt.epoch == 'latest':
             break
-        model.set_input(data)  # unpack data from data loader
-        model.test()  # run inference
-        visuals = model.get_current_visuals()  # get image results
-        img_path = model.get_image_paths()  # get image paths
-        if i % 5 == 0:  # save images to an HTML file
-            print('processing (%04d)-th image... %s' % (i, img_path))
-        image_dir = webpage.get_image_dir()
-        short_path = ntpath.basename(img_path[0])
-        name = os.path.splitext(short_path)[0]
-        for label, im_data in visuals.items():
-            im = util.tensor2im(im_data)
-            image_name = '%s_%s.png' % (name, label)
-            save_path = os.path.join(image_dir, image_name)
-            util.save_image(im, save_path, aspect_ratio=1.0)
-
-    dir1 = os.path.join(web_dir, 'set1')
-    dir2 = os.path.join(web_dir, 'set2')
-
-    if not os.path.exists(dir1):
-        os.makedirs(dir1)
-        os.makedirs(dir2)
-
-    for file in os.listdir(image_dir):
-        img = Image.open(os.path.join(image_dir, file))
-        flag = file.split('_')[-1].split('.')[0]
-        if flag == 'real':
-            img.save(os.path.join(dir1, file))
-        elif flag == 'fake':
-            img.save(os.path.join(dir2, file))
-        else:
-            raise NotImplementedError
-
-    dir_gt = opt.dataroot + '/valB/'
-    print("Path_gt: {}".format(dir_gt))
-    print("Path_pred: {}".format(dir2))
-
-    fid_value = fid_score.calculate_fid_given_paths(paths=[dir_gt, dir2],
-                                                    batch_size=50,
-                                                    cuda=opt.gpu_ids[0],
-                                                    dims=2048)
-    print(fid_value)
+        results.append(fid_value)
+        epochs.append(epoch)
+        print(dict(zip(epochs, results)))
     #     save_images(webpage, visuals, img_path, aspect_ratio=opt.aspect_ratio, width=opt.display_winsize, use_wandb=opt.use_wandb)
     # webpage.save()  # save the HTML
