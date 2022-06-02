@@ -1,6 +1,7 @@
  
-运行：`python train.py --dataroot ./train_dataset --name basic_cyclegan_MPA9 --model cycle_gan --netG MPA_9blocks --gpu_ids 0`  
-权值文件：
+**Train**：`python train.py --dataroot ./monet_dataset --name basic_cyclegan_MPA9 --model cycle_gan --netG MPA_9blocks --gpu_ids 0`  
+权值文件（百度网盘链接）：
+[https://pan.baidu.com/s/1FjxBrEnvWYZBtmbEnHeV_g](https://pan.baidu.com/s/1FjxBrEnvWYZBtmbEnHeV_g) Access Code: `pa1q`      
 
 <br><br><br>
 
