@@ -6,6 +6,7 @@ from torch.optim import lr_scheduler
 from .convnext import convnext_base, convnext_large
 from .convnext import Single_Block as ConvXBlock
 import torch.nn.functional as F
+from .attention import SAtten_Block
 
 ###############################################################################
 # Helper Functions
@@ -157,10 +158,22 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=18)
     elif netG == 'convnext_27blocks':
         net = ConvNeXtGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=27)
+    elif netG == 'MPA_9blocks':
+        net = MultiPathGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=9)
+    # elif netG == 'MPNet_6blocks':
+    #     net = MultiPathGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=6)
+    # elif netG == 'MPNet_12blocks':
+    #     net = MultiPathGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=12)
+    # elif netG == 'DPNet_6blocks':
+    #     net = DensePathGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=6)
+    # elif netG == 'MPANet_6blocks':
+    #     net = MultiPathGenerator_Attention(input_nc, output_nc, ngf, norm_layer=norm_layer, n_blocks=6)
     elif netG == 'unet_128':
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif netG == 'unet_256_r':
+        net = UnetGenerator_R(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'convnext_B':
         net = convnext_base(pretrained=True, in_22k=True)
         return init_net(net, init_type, init_gain, gpu_ids, weights_required=False)
@@ -449,6 +462,351 @@ class ConvNeXtGenerator(nn.Module):
         """Standard forward"""
         return self.model(input)
 
+class MultiPathGenerator(nn.Module):
+    """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
+
+    We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            n_blocks (int)      -- the number of ResNet blocks
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        assert(n_blocks >= 0)
+        super(MultiPathGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+
+        model += [MultiPathBlock_s(ngf * mult, padding_type, norm_layer, use_dropout, use_bias, block_num=n_blocks)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        """Standard forward"""
+        return self.model(input)
+
+class MultiPathGenerator_Attention(nn.Module):
+    """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
+
+    We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            n_blocks (int)      -- the number of ResNet blocks
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        assert(n_blocks >= 0)
+        super(MultiPathGenerator_Attention, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+
+        model += [MultiPathBlock_n(ngf * mult, padding_type, norm_layer, use_dropout, use_bias, block_num=n_blocks)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        """Standard forward"""
+        return self.model(input)
+
+
+class DensePathGenerator(nn.Module):
+    """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
+
+    We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            n_blocks (int)      -- the number of ResNet blocks
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+        """
+        assert(n_blocks >= 0)
+        super(DensePathGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+
+        model += [MultiPathBlock_a(ngf * mult, padding_type, norm_layer, use_dropout, use_bias, block_num=n_blocks)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, input):
+        """Standard forward"""
+        return self.model(input)
+
+class MultiPathBlock(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super().__init__()
+        self.path1 = ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias)
+        self.path2 = ConvXBlock(dim)
+        #self.path3 = SAtten_Block(in_chans=dim*4, embed_dims=dim*4, num_heads=4, drop_rate=0, sr_ratios=1, patch_size=1)
+        self.path3 = nn.Sequential(
+            nn.Conv2d(dim*2,dim*2,3,1,1),
+            nn.BatchNorm2d(dim*2),
+            nn.GELU()
+        )
+
+    def forward(self, x1, x2, x3):
+        # Multi-path
+        x1 = self.path1(x1)
+        x2 = self.path2(x2)
+        x3 = self.path3(x3)
+        return x1, x2, x3
+
+class MultiPathBlock_Attention(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super().__init__()
+        self.path1 = ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias)
+        self.path2 = ConvXBlock(dim)
+        self.path3 = SAtten_Block(in_chans=dim*2, embed_dims=dim*2, num_heads=4, drop_rate=0, sr_ratios=1, patch_size=1)
+
+    def forward(self, x1, x2, x3):
+        # Multi-path
+        x1 = self.path1(x1)
+        x2 = self.path2(x2)
+        x3 = self.path3(x3)
+        return x1, x2, x3
+
+class HRModule(nn.Module):
+    def __init__(self, dim, ):
+        super().__init__()
+        self.dual_down = nn.Conv2d(dim, dim * 2, kernel_size=4, stride=4, padding=0)
+        self.single_down12 = nn.Conv2d(dim, dim, kernel_size=4, stride=2, padding=1)
+        self.single_down23 = nn.Conv2d(dim, dim * 2, kernel_size=4, stride=2, padding=1)
+        self.dual_up = nn.Conv2d(dim * 2, dim, kernel_size=3, stride=1, padding=1)
+        self.single_up12 = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1)
+        self.single_up23 = nn.Conv2d(dim * 2, dim, kernel_size=3, stride=1, padding=1)
+
+    def _up_sampling(self, x, H, W):
+        return F.interpolate(x, size=(H, W), mode='bilinear')
+
+    def forward(self, x1, x2, x3):
+        _, _, H, W = x1.shape
+        # HR-connection
+        x1 = x1 + self.single_up12(self._up_sampling(x2, H, W)) + self.dual_up(self._up_sampling(x3, H, W))
+        x2 = x2 + self.single_up23(self._up_sampling(x3, H//2, W//2)) + self.single_down12(x1)
+        x3 = x3 + self.dual_down(x1) + self.single_down23(x2)
+        return x1, x2, x3
+
+class MultiPathBlock_s(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias, block_num):
+        super().__init__()
+        self.head = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=4, stride=2, padding=1),
+                                  nn.Conv2d(dim, dim*2, kernel_size=4, stride=2, padding=1)])
+        self.blocks = nn.ModuleList([])
+        for i in range(block_num):
+            self.blocks.append(MultiPathBlock(dim, padding_type, norm_layer, use_dropout, use_bias))
+        #self.HR = HRModule(dim)
+        self.reduce = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0),
+                                  nn.Conv2d(dim*2, dim, kernel_size=1, stride=1, padding=0)])
+        # self.bottom = ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias)
+        self.num = block_num
+
+    def _up_sampling(self, x, H, W):
+        return F.interpolate(x, size=(H, W), mode='bilinear')
+
+    def forward(self, x):
+        _, _, H, W = x.shape
+        # Cascade Head
+        x1 = x
+        x2 = self.head[0](x1)
+        x3 = self.head[1](x2)
+        for i in range(self.num):
+            x1, x2, x3 = self.blocks[i](x1, x2, x3)
+            # if i % 6 == 5:
+            #     x1, x2, x3 = self.HR(x1, x2, x3)
+        # Cascade Bottom
+        x2 = x2 + self.reduce[1](self._up_sampling(x3, H//2, W//2))
+        x = x1 + self.reduce[0](self._up_sampling(x2, H, W))
+        #x = self.bottom(x1)
+
+        return x
+
+class MultiPathBlock_a(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias, block_num):
+        super().__init__()
+        self.top = nn.Sequential(ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias),
+                                    ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias))
+        self.head = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=4, stride=2, padding=1),
+                                  nn.Conv2d(dim, dim*2, kernel_size=4, stride=2, padding=1)])
+        self.blocks = nn.ModuleList([])
+        for i in range(block_num):
+            self.blocks.append(MultiPathBlock(dim, padding_type, norm_layer, use_dropout, use_bias))
+        self.HR = HRModule(dim)
+        self.reduce = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0),
+                                  nn.Conv2d(dim*2, dim, kernel_size=1, stride=1, padding=0)])
+        self.bottom = nn.Sequential(ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias),
+                                    ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias))
+        self.num = block_num
+
+    def _up_sampling(self, x, H, W):
+        return F.interpolate(x, size=(H, W), mode='bilinear')
+
+    def forward(self, x):
+        _, _, H, W = x.shape
+        x = self.top(x)
+        # Cascade Head
+        x1 = x
+        x2 = self.head[0](x1)
+        x3 = self.head[1](x2)
+        for i in range(self.num):
+            x1, x2, x3 = self.blocks[i](x1, x2, x3)
+            if i % 2 == 1:
+                x1, x2, x3 = self.HR(x1, x2, x3)
+        # Cascade Bottom
+        x2 = x2 + self.reduce[1](self._up_sampling(x3, H//2, W//2))
+        x1 = x1 + self.reduce[0](self._up_sampling(x2, H, W))
+        x = self.bottom(x1)
+
+        return x
+
+
+class MultiPathBlock_n(nn.Module):
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias, block_num):
+        super().__init__()
+        self.head = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(dim, dim, kernel_size=4, stride=2, padding=1),
+                          ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias)),
+            nn.Sequential(nn.Conv2d(dim, dim*2, kernel_size=4, stride=2, padding=1),
+                          ResnetBlock(dim*2, padding_type, norm_layer, use_dropout, use_bias))
+        ])
+        self.blocks = nn.ModuleList([])
+        assert block_num > 2
+        for i in range(block_num - 1):
+            self.blocks.append(MultiPathBlock(dim, padding_type, norm_layer, use_dropout, use_bias))
+        self.blocks.append(MultiPathBlock_Attention(dim, padding_type, norm_layer, use_dropout, use_bias))
+        # self.HR = HRModule(dim)
+        self.reduce = nn.ModuleList([nn.Conv2d(dim, dim, kernel_size=1, stride=1, padding=0),
+                                  nn.Conv2d(dim*2, dim, kernel_size=1, stride=1, padding=0)])
+        self.bottom = ResnetBlock(dim, padding_type, norm_layer, use_dropout, use_bias)
+        self.num = block_num
+
+    def _up_sampling(self, x, H, W):
+        return F.interpolate(x, size=(H, W), mode='bilinear')
+
+    def forward(self, x):
+        _, _, H, W = x.shape
+        # Cascade Head
+        x1 = x
+        x2 = self.head[0](x1)
+        x3 = self.head[1](x2)
+        for i in range(self.num):
+            x1, x2, x3 = self.blocks[i](x1, x2, x3)
+
+        # Cascade Bottom
+        x2 = x2 + self.reduce[1](self._up_sampling(x3, H//2, W//2))
+        x1 = x1 + self.reduce[0](self._up_sampling(x2, H, W))
+        x = self.bottom(x1)
+
+        return x
+
+
 class ResnetBlock(nn.Module):
     """Define a Resnet block"""
 
@@ -541,6 +899,38 @@ class UnetGenerator(nn.Module):
         return self.model(input)
 
 
+class UnetGenerator_R(nn.Module):
+    """Create a Unet-based generator"""
+
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        """Construct a Unet generator
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            output_nc (int) -- the number of channels in output images
+            num_downs (int) -- the number of downsamplings in UNet. For example, # if |num_downs| == 7,
+                                image of size 128x128 will become of size 1x1 # at the bottleneck
+            ngf (int)       -- the number of filters in the last conv layer
+            norm_layer      -- normalization layer
+
+        We construct the U-Net from the innermost layer to the outermost layer.
+        It is a recursive process.
+        """
+        super(UnetGenerator_R, self).__init__()
+        # construct unet structure
+        unet_block = UnetSkipConnectionBlock_R(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True)  # add the innermost layer
+        for i in range(num_downs - 5):          # add intermediate layers with ngf * 8 filters
+            unet_block = UnetSkipConnectionBlock_R(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout)
+        # gradually reduce the number of filters from ngf * 8 to ngf
+        unet_block = UnetSkipConnectionBlock_R(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock_R(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlock_R(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
+        self.model = UnetSkipConnectionBlock_R(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True, norm_layer=norm_layer)  # add the outermost layer
+
+    def forward(self, input):
+        """Standard forward"""
+        return self.model(input)
+
+
 class UnetSkipConnectionBlock(nn.Module):
     """Defines the Unet submodule with skip connection.
         X -------------------identity----------------------
@@ -594,6 +984,76 @@ class UnetSkipConnectionBlock(nn.Module):
             upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc,
                                         kernel_size=4, stride=2,
                                         padding=1, bias=use_bias)
+            down = [downrelu, downconv, downnorm]
+            up = [uprelu, upconv, upnorm]
+
+            if use_dropout:
+                model = down + [submodule] + up + [nn.Dropout(0.5)]
+            else:
+                model = down + [submodule] + up
+
+        self.model = nn.Sequential(*model)
+
+    def forward(self, x):
+        if self.outermost:
+            return self.model(x)
+        else:   # add skip connections
+            return torch.cat([x, self.model(x)], 1)
+
+
+class UnetSkipConnectionBlock_R(nn.Module):
+    """Defines the Unet submodule with skip connection.
+        X -------------------identity----------------------
+        |-- downsampling -- |submodule| -- upsampling --|
+    """
+
+    def __init__(self, outer_nc, inner_nc, input_nc=None,
+                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        """Construct a Unet submodule with skip connections.
+
+        Parameters:
+            outer_nc (int) -- the number of filters in the outer conv layer
+            inner_nc (int) -- the number of filters in the inner conv layer
+            input_nc (int) -- the number of channels in input images/features
+            submodule (UnetSkipConnectionBlock) -- previously defined submodules
+            outermost (bool)    -- if this module is the outermost module
+            innermost (bool)    -- if this module is the innermost module
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers.
+        """
+        super(UnetSkipConnectionBlock_R, self).__init__()
+        self.outermost = outermost
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+        if input_nc is None:
+            input_nc = outer_nc
+        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4,
+                             stride=2, padding=1, bias=use_bias)
+        downrelu = nn.LeakyReLU(0.2, True)
+        downnorm = norm_layer(inner_nc)
+        uprelu = nn.ReLU(True)
+        upnorm = norm_layer(outer_nc)
+
+        if outermost:
+            upconv = nn.Sequential(
+                                    nn.UpsamplingBilinear2d(scale_factor=2),
+                                   nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=5, stride=1, padding=2))
+            down = [downconv]
+            up = [uprelu, upconv, nn.Tanh()]
+            model = down + [submodule] + up
+        elif innermost:
+            upconv = nn.Sequential(
+                                    nn.UpsamplingBilinear2d(scale_factor=2),
+                                   nn.Conv2d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1))
+            down = [downrelu, downconv]
+            up = [uprelu, upconv, upnorm]
+            model = down + up
+        else:
+            upconv = nn.Sequential(
+                                    nn.UpsamplingBilinear2d(scale_factor=2),
+                                   nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=5, stride=1, padding=2))
             down = [downrelu, downconv, downnorm]
             up = [uprelu, upconv, upnorm]
 
